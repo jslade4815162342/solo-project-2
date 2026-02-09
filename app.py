@@ -10,44 +10,19 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 PAGE_SIZE = 10
 
-# Use a persistent disk path on Render if you attach one (recommended)
-# Example Render disk mount: /data
-DATA_DIR = Path(os.environ.get("DATA_DIR", "."))  # "." works locally
+# If you attach a Render disk mounted at /data, set env var DATA_DIR=/data in Render.
+# Otherwise it will use the folder where this app.py lives.
+DEFAULT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("DATA_DIR", str(DEFAULT_DIR))).resolve()
 MOVIES_PATH = DATA_DIR / "movies.json"
 
 
 # -------------------------
-# JSON helpers
+# JSON persistence helpers
 # -------------------------
-def _ensure_seed_data():
-    """If movies.json doesn't exist, create it with a seeded dataset (30+ records expected)."""
-    if MOVIES_PATH.exists():
-        return
-
-    # If you keep a seed file in repo, you can copy it here. For simplicity, create an empty list.
-    # But your rubric requires 30+ on start, so you should commit movies.json with 30+ records.
-    MOVIES_PATH.write_text("[]", encoding="utf-8")
-
-
-def _read_movies():
-    _ensure_seed_data()
-    try:
-        raw = MOVIES_PATH.read_text(encoding="utf-8").strip()
-        if not raw:
-            return []
-        data = json.loads(raw)
-        if not isinstance(data, list):
-            return []
-        return data
-    except Exception:
-        # If file is corrupted, don't crash the app
-        return []
-
-
 def _atomic_write_json(path: Path, data):
-    """Write JSON safely (minimize risk of corruption)."""
+    """Write JSON safely to reduce corruption risk."""
     path.parent.mkdir(parents=True, exist_ok=True)
-
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix="tmp_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -63,6 +38,39 @@ def _atomic_write_json(path: Path, data):
             pass
 
 
+def _ensure_seed_data():
+    """
+    Guarantee the app starts with 30+ records.
+
+    - If the persistent movies.json doesn't exist at MOVIES_PATH yet,
+      copy the seed movies.json from the repo directory (same folder as app.py).
+    - This is especially important when using Render disk: /data/movies.json
+      may not exist the first time you deploy.
+    """
+    if MOVIES_PATH.exists():
+        return
+
+    seed_path = DEFAULT_DIR / "movies.json"  # repo seed file next to app.py
+    if seed_path.exists():
+        MOVIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MOVIES_PATH.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
+    else:
+        # Fallback if seed file missing (shouldn't happen if you committed it)
+        _atomic_write_json(MOVIES_PATH, [])
+
+
+def _read_movies():
+    _ensure_seed_data()
+    try:
+        raw = MOVIES_PATH.read_text(encoding="utf-8").strip()
+        if not raw:
+            return []
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 def _write_movies(movies):
     _atomic_write_json(MOVIES_PATH, movies)
 
@@ -70,37 +78,33 @@ def _write_movies(movies):
 # -------------------------
 # Validation
 # -------------------------
-def _validate_movie(payload, is_update=False):
+def _validate_movie(payload):
     errors = {}
 
-    def required_str(field, min_len=1, max_len=120):
-        val = payload.get(field)
-        if val is None or not str(val).strip():
-            errors[field] = f"{field.capitalize()} is required."
-            return None
-        s = str(val).strip()
-        if len(s) < min_len:
-            errors[field] = f"{field.capitalize()} must be at least {min_len} characters."
-        if len(s) > max_len:
-            errors[field] = f"{field.capitalize()} must be {max_len} characters or less."
-        return s
+    title = (payload.get("title") or "").strip()
+    director = (payload.get("director") or "").strip()
 
-    title = required_str("title", 1, 120)
-    director = required_str("director", 1, 120)
+    if not title:
+        errors["title"] = "Title is required."
+    elif len(title) > 120:
+        errors["title"] = "Title must be 120 characters or less."
+
+    if not director:
+        errors["director"] = "Director is required."
+    elif len(director) > 120:
+        errors["director"] = "Director must be 120 characters or less."
 
     # year
-    year = payload.get("year")
     try:
-        year = int(year)
+        year = int(payload.get("year"))
         if year < 1888 or year > 2100:
             errors["year"] = "Year must be between 1888 and 2100."
     except Exception:
         errors["year"] = "Year must be a whole number."
 
     # rating
-    rating = payload.get("rating")
     try:
-        rating = float(rating)
+        rating = float(payload.get("rating"))
         if rating < 0 or rating > 10:
             errors["rating"] = "Rating must be between 0 and 10."
         rating = round(rating, 1)
@@ -121,7 +125,6 @@ def _validate_movie(payload, is_update=False):
 # -------------------------
 # Routes
 # -------------------------
-
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
@@ -130,16 +133,19 @@ def health():
 @app.get("/movies")
 def list_movies():
     movies = _read_movies()
-    page = request.args.get("page", "1")
+
     try:
-        page = int(page)
+        page = int(request.args.get("page", 1))
     except Exception:
         page = 1
+
     if page < 1:
         page = 1
 
     total = len(movies)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    # Clamp page to valid range (important after deletes)
     if page > total_pages:
         page = total_pages
 
@@ -163,17 +169,19 @@ def add_movie():
         return jsonify({"errors": errors}), 400
 
     movies = _read_movies()
-    next_id = (max((m.get("id", 0) for m in movies), default=0) + 1)
+    next_id = max((int(m.get("id", 0)) for m in movies), default=0) + 1
     movie["id"] = next_id
+
     movies.append(movie)
     _write_movies(movies)
+
     return jsonify(movie), 201
 
 
 @app.put("/movies/<int:movie_id>")
 def update_movie(movie_id):
     payload = request.get_json(silent=True) or {}
-    movie, errors = _validate_movie(payload, is_update=True)
+    movie, errors = _validate_movie(payload)
     if errors:
         return jsonify({"errors": errors}), 400
 
@@ -220,7 +228,7 @@ def stats():
     avg = sum(float(m.get("rating", 0)) for m in movies) / total
     avg = round(avg, 2)
 
-    # Domain stat: top director by count
+    # Domain-specific stat: top director by count
     counts = {}
     for m in movies:
         d = (m.get("director") or "").strip()
@@ -236,3 +244,8 @@ def stats():
         "topDirector": top_director,
         "topDirectorCount": top_count
     })
+
+
+# Local dev only (Render uses gunicorn)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
