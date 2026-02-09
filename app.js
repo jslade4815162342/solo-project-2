@@ -1,4 +1,4 @@
-const API_BASE = "https://YOUR-RENDER-URL.onrender.com";
+const API_BASE = "https://solo-project-2-j3k5.onrender.com";
 let currentPage = 1;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -81,4 +81,5 @@ async function loadStats() {
   const res = await fetch(`${API_BASE}/stats`);
   const data = await res.json();
   stats.innerText = `Total Movies: ${data.total}, Avg Rating: ${data.averageRating}`;
+
 }
