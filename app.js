@@ -83,3 +83,4 @@ async function loadStats() {
   stats.innerText = `Total Movies: ${data.total}, Avg Rating: ${data.averageRating}`;
 
 }
+
