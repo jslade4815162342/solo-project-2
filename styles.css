@@ -1,19 +1,133 @@
+* { box-sizing: border-box; }
+
 body {
   font-family: Arial, sans-serif;
   padding: 20px;
+  margin: 0;
+  background: #f6f7fb;
+  color: #222;
+}
+
+header {
+  margin-bottom: 16px;
+}
+
+.sub {
+  margin-top: 6px;
+  color: #555;
+}
+
+main {
+  display: grid;
+  gap: 16px;
+  max-width: 1000px;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e6e7ee;
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.table-wrap {
+  overflow-x: auto;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
   margin-bottom: 10px;
+  min-width: 680px;
 }
 
 th, td {
-  border: 1px solid #ccc;
-  padding: 8px;
+  border: 1px solid #ddd;
+  padding: 10px;
+  vertical-align: top;
 }
 
-#paging button {
-  margin: 5px;
+th {
+  background: #fafafa;
+  text-align: left;
+}
+
+.actions button {
+  margin-right: 6px;
+}
+
+.paging {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.form {
+  display: grid;
+  gap: 10px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 14px;
+}
+
+input {
+  padding: 10px;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+}
+
+input.invalid {
+  border-color: #d33;
+  outline: 2px solid rgba(221, 51, 51, 0.15);
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 10px 12px;
+  border: 1px solid #222;
+  background: #222;
+  color: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: #fff;
+  color: #222;
+}
+
+button.danger {
+  border-color: #b00020;
+  background: #b00020;
+}
+
+.errors {
+  background: #fff3f3;
+  border: 1px solid #ffd0d0;
+  color: #8a0000;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.errors:empty {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  body { padding: 12px; }
+  table { min-width: 620px; }
 }
