@@ -1,88 +1,46 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from pathlib import Path
-import json
 import os
-import tempfile
+import json
+from pathlib import Path
+
+from flask import Flask, request, jsonify, render_template
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
 
-PAGE_SIZE = 10
+# Render provides DATABASE_URL for Postgres.
+# SQLAlchemy expects postgresql:// (not postgres://)
+db_url = os.environ.get("DATABASE_URL", "")
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-# If you attach a Render disk mounted at /data, set env var DATA_DIR=/data in Render.
-# Otherwise it will use the folder where this app.py lives.
-DEFAULT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.environ.get("DATA_DIR", str(DEFAULT_DIR))).resolve()
-MOVIES_PATH = DATA_DIR / "movies.json"
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
+db = SQLAlchemy(app)
 
-# -------------------------
-# JSON persistence helpers
-# -------------------------
-def _atomic_write_json(path: Path, data):
-    """Write JSON safely to reduce corruption risk."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix="tmp_", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
+BASE_DIR = Path(__file__).resolve().parent
+SEED_PATH = BASE_DIR / "movies.json"
+PLACEHOLDER_IMG = "https://via.placeholder.com/120x180?text=No+Image"
 
 
-def _ensure_seed_data():
-    """
-    Guarantee the app starts with 30+ records.
+class Movie(db.Model):
+    __tablename__ = "movies"
 
-    - If the persistent movies.json doesn't exist at MOVIES_PATH yet,
-      copy the seed movies.json from the repo directory (same folder as app.py).
-    - This is especially important when using Render disk: /data/movies.json
-      may not exist the first time you deploy.
-    """
-    if MOVIES_PATH.exists():
-        return
-
-    seed_path = DEFAULT_DIR / "movies.json"  # repo seed file next to app.py
-    if seed_path.exists():
-        MOVIES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MOVIES_PATH.write_text(seed_path.read_text(encoding="utf-8"), encoding="utf-8")
-    else:
-        # Fallback if seed file missing (shouldn't happen if you committed it)
-        _atomic_write_json(MOVIES_PATH, [])
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(120), nullable=False)
+    director = db.Column(db.String(120), nullable=False)
+    year = db.Column(db.Integer, nullable=False)
+    rating = db.Column(db.Float, nullable=False)
+    image_url = db.Column(db.String(500), nullable=False, default=PLACEHOLDER_IMG)
 
 
-def _read_movies():
-    _ensure_seed_data()
-    try:
-        raw = MOVIES_PATH.read_text(encoding="utf-8").strip()
-        if not raw:
-            return []
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _write_movies(movies):
-    _atomic_write_json(MOVIES_PATH, movies)
-
-
-# -------------------------
-# Validation
-# -------------------------
-def _validate_movie(payload):
+def validate_movie(payload):
     errors = {}
 
     title = (payload.get("title") or "").strip()
     director = (payload.get("director") or "").strip()
+    image_url = (payload.get("image_url") or "").strip() or PLACEHOLDER_IMG
 
     if not title:
         errors["title"] = "Title is required."
@@ -94,7 +52,6 @@ def _validate_movie(payload):
     elif len(director) > 120:
         errors["director"] = "Director must be 120 characters or less."
 
-    # year
     try:
         year = int(payload.get("year"))
         if year < 1888 or year > 2100:
@@ -102,7 +59,6 @@ def _validate_movie(payload):
     except Exception:
         errors["year"] = "Year must be a whole number."
 
-    # rating
     try:
         rating = float(payload.get("rating"))
         if rating < 0 or rating > 10:
@@ -118,134 +74,240 @@ def _validate_movie(payload):
         "title": title,
         "director": director,
         "year": year,
-        "rating": rating
+        "rating": rating,
+        "image_url": image_url,
     }, None
 
 
-# -------------------------
-# Routes
-# -------------------------
+def ensure_schema_and_seed():
+    db.create_all()
+
+    # Seed only if table is empty
+    if Movie.query.count() > 0:
+        return
+
+    if not SEED_PATH.exists():
+        return
+
+    try:
+        seed = json.loads(SEED_PATH.read_text(encoding="utf-8"))
+        if not isinstance(seed, list):
+            return
+    except Exception:
+        return
+
+    for raw in seed:
+        try:
+            title = (raw.get("title") or "").strip()
+            director = (raw.get("director") or "").strip()
+            year = int(raw.get("year", 2000))
+            rating = float(raw.get("rating", 0))
+            image_url = (raw.get("image_url") or raw.get("image") or "").strip() or PLACEHOLDER_IMG
+
+            if not title or not director:
+                continue
+
+            db.session.add(Movie(
+                title=title,
+                director=director,
+                year=year,
+                rating=rating,
+                image_url=image_url
+            ))
+        except Exception:
+            continue
+
+    db.session.commit()
+
+
+@app.before_request
+def _init_once():
+    # Safe to call often; only seeds if empty
+    ensure_schema_and_seed()
+
+
+# -----------------------
+# UI routes
+# -----------------------
+@app.get("/")
+def home():
+    return render_template("index.html")
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
 
 
-@app.get("/movies")
-def list_movies():
-    movies = _read_movies()
+# -----------------------
+# API routes
+# -----------------------
+@app.get("/api/movies/<int:movie_id>")
+def get_movie(movie_id):
+    m = Movie.query.get(movie_id)
+    if not m:
+        return jsonify({"message": "Movie not found."}), 404
+    return jsonify({
+        "id": m.id,
+        "title": m.title,
+        "director": m.director,
+        "year": m.year,
+        "rating": m.rating,
+        "image_url": m.image_url,
+    })
 
+
+@app.get("/api/movies")
+def list_movies():
+    # Paging inputs
     try:
-        page = int(request.args.get("page", 1))
+        page = max(1, int(request.args.get("page", 1)))
     except Exception:
         page = 1
 
-    if page < 1:
-        page = 1
+    try:
+        page_size = int(request.args.get("pageSize", 10))
+        page_size = page_size if page_size in (5, 10, 20, 50) else 10
+    except Exception:
+        page_size = 10
 
-    total = len(movies)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    # Search/filter
+    q = (request.args.get("q") or "").strip()
 
-    # Clamp page to valid range (important after deletes)
+    # Sorting
+    sort = (request.args.get("sort") or "title").strip()
+    direction = (request.args.get("dir") or "asc").strip().lower()
+
+    sort_map = {
+        "title": Movie.title,
+        "director": Movie.director,
+        "year": Movie.year,
+        "rating": Movie.rating,
+    }
+    sort_col = sort_map.get(sort, Movie.title)
+    sort_col = sort_col.desc() if direction == "desc" else sort_col.asc()
+
+    query = Movie.query
+    if q:
+        like = f"%{q}%"
+        query = query.filter(
+            (Movie.title.ilike(like)) | (Movie.director.ilike(like))
+        )
+
+    total_filtered = query.count()
+    total_pages = max(1, (total_filtered + page_size - 1) // page_size)
     if page > total_pages:
         page = total_pages
 
-    start = (page - 1) * PAGE_SIZE
-    end = start + PAGE_SIZE
+    movies = (
+        query.order_by(sort_col)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     return jsonify({
-        "movies": movies[start:end],
+        "movies": [
+            {
+                "id": m.id,
+                "title": m.title,
+                "director": m.director,
+                "year": m.year,
+                "rating": m.rating,
+                "image_url": m.image_url,
+            } for m in movies
+        ],
         "page": page,
-        "pageSize": PAGE_SIZE,
-        "total": total,
-        "totalPages": total_pages
+        "pageSize": page_size,
+        "totalFiltered": total_filtered,
+        "totalPages": total_pages,
     })
 
 
-@app.post("/movies")
+@app.post("/api/movies")
 def add_movie():
     payload = request.get_json(silent=True) or {}
-    movie, errors = _validate_movie(payload)
+    movie, errors = validate_movie(payload)
     if errors:
         return jsonify({"errors": errors}), 400
 
-    movies = _read_movies()
-    next_id = max((int(m.get("id", 0)) for m in movies), default=0) + 1
-    movie["id"] = next_id
+    m = Movie(**movie)
+    db.session.add(m)
+    db.session.commit()
 
-    movies.append(movie)
-    _write_movies(movies)
+    return jsonify({
+        "id": m.id,
+        **movie
+    }), 201
 
-    return jsonify(movie), 201
 
-
-@app.put("/movies/<int:movie_id>")
+@app.put("/api/movies/<int:movie_id>")
 def update_movie(movie_id):
     payload = request.get_json(silent=True) or {}
-    movie, errors = _validate_movie(payload)
+    movie, errors = validate_movie(payload)
     if errors:
         return jsonify({"errors": errors}), 400
 
-    movies = _read_movies()
-    found = False
-    for m in movies:
-        if int(m.get("id", -1)) == movie_id:
-            m.update(movie)
-            found = True
-            break
-
-    if not found:
+    m = Movie.query.get(movie_id)
+    if not m:
         return jsonify({"message": "Movie not found."}), 404
 
-    _write_movies(movies)
-    return jsonify({"id": movie_id, **movie})
+    for k, v in movie.items():
+        setattr(m, k, v)
+
+    db.session.commit()
+
+    return jsonify({
+        "id": m.id,
+        **movie
+    })
 
 
-@app.delete("/movies/<int:movie_id>")
+@app.delete("/api/movies/<int:movie_id>")
 def delete_movie(movie_id):
-    movies = _read_movies()
-    new_movies = [m for m in movies if int(m.get("id", -1)) != movie_id]
-
-    if len(new_movies) == len(movies):
+    m = Movie.query.get(movie_id)
+    if not m:
         return jsonify({"message": "Movie not found."}), 404
 
-    _write_movies(new_movies)
+    db.session.delete(m)
+    db.session.commit()
     return "", 204
 
 
-@app.get("/stats")
+@app.get("/api/stats")
 def stats():
-    movies = _read_movies()
-    total = len(movies)
+    """
+    Requirements:
+    - Total number of records (entire dataset)
+    - Current page size
+    - At least one domain-specific stat
+    """
+    try:
+        page_size = int(request.args.get("pageSize", 10))
+        page_size = page_size if page_size in (5, 10, 20, 50) else 10
+    except Exception:
+        page_size = 10
 
-    if total == 0:
-        return jsonify({
-            "total": 0,
-            "averageRating": 0,
-            "topDirector": None,
-            "topDirectorCount": 0
-        })
+    total_all = db.session.query(func.count(Movie.id)).scalar() or 0
 
-    avg = sum(float(m.get("rating", 0)) for m in movies) / total
-    avg = round(avg, 2)
+    avg_rating = db.session.query(func.avg(Movie.rating)).scalar()
+    avg_rating = round(float(avg_rating), 2) if avg_rating is not None else 0.0
 
-    # Domain-specific stat: top director by count
-    counts = {}
-    for m in movies:
-        d = (m.get("director") or "").strip()
-        if d:
-            counts[d] = counts.get(d, 0) + 1
+    # Domain stat: top director by count
+    top = (
+        db.session.query(Movie.director, func.count(Movie.id).label("c"))
+        .group_by(Movie.director)
+        .order_by(func.count(Movie.id).desc())
+        .first()
+    )
 
-    top_director = max(counts, key=counts.get) if counts else None
-    top_count = counts.get(top_director, 0) if top_director else 0
+    top_director = top[0] if top else None
+    top_director_count = int(top[1]) if top else 0
 
     return jsonify({
-        "total": total,
-        "averageRating": avg,
+        "totalRecords": int(total_all),
+        "currentPageSize": int(page_size),
+        "averageRating": avg_rating,
         "topDirector": top_director,
-        "topDirectorCount": top_count
+        "topDirectorCount": top_director_count,
     })
-
-
-# Local dev only (Render uses gunicorn)
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
